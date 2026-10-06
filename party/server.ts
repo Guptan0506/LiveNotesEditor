@@ -1,50 +1,91 @@
 import type * as Party from "partykit/server";
 
-export default class Server implements Party.Server {
-  count = 0;
+export interface NoteState {
+  content: string;
+  lastEditedBy: string;
+  lastEditedAt: number;
+}
+
+export interface User {
+  id: string;
+  name: string;
+  color: string;
+}
+
+type ServerMessage =
+  | { type: "update"; content: string; user: User }
+  | { type: "join"; user: User }
+  | { type: "leave"; userId: string }
+  | { type: "sync"; note: NoteState; users: User[] };
+
+const COLORS = [
+  "#e63946", "#2a9d8f", "#e9c46a", "#f4a261",
+  "#457b9d", "#8338ec", "#fb5607", "#3a86ff",
+];
+
+export default class LiveNotesServer implements Party.Server {
+  note: NoteState = { content: "", lastEditedBy: "", lastEditedAt: 0 };
+  users: Map<string, User> = new Map();
 
   constructor(readonly room: Party.Room) {}
 
-  onConnect(conn: Party.Connection, ctx: Party.ConnectionContext) {
-    // A websocket just connected!
-    console.log(
-      `Connected:
-  id: ${conn.id}
-  room: ${this.room.id}
-  url: ${new URL(ctx.request.url).pathname}`
-    );
+  async onStart() {
+    // Persist note across restarts
+    const saved = await this.room.storage.get<NoteState>("note");
+    if (saved) this.note = saved;
+  }
 
-    // send the current count to the new client
-    conn.send(this.count.toString());
+  onConnect(conn: Party.Connection, ctx: Party.ConnectionContext) {
+    const url = new URL(ctx.request.url);
+    const name = url.searchParams.get("name") || "Anonymous";
+    const color = COLORS[this.users.size % COLORS.length];
+
+    const user: User = { id: conn.id, name, color };
+    this.users.set(conn.id, user);
+
+    // Send current state to the new joiner
+    const syncMsg: ServerMessage = {
+      type: "sync",
+      note: this.note,
+      users: [...this.users.values()],
+    };
+    conn.send(JSON.stringify(syncMsg));
+
+    // Notify everyone else
+    this.room.broadcast(
+      JSON.stringify({ type: "join", user } satisfies ServerMessage),
+      [conn.id]
+    );
   }
 
   onMessage(message: string, sender: Party.Connection) {
-    // let's log the message
-    console.log(`connection ${sender.id} sent message: ${message}`);
-    // we could use a more sophisticated protocol here, such as JSON
-    // in the message data, but for simplicity we just use a string
-    if (message === "increment") {
-      this.increment();
-    }
+    const data = JSON.parse(message) as { type: "update"; content: string };
+    const user = this.users.get(sender.id);
+    if (!user || data.type !== "update") return;
+
+    this.note = {
+      content: data.content,
+      lastEditedBy: user.name,
+      lastEditedAt: Date.now(),
+    };
+
+    // Persist to durable storage
+    this.room.storage.put("note", this.note);
+
+    // Broadcast to all OTHER clients
+    this.room.broadcast(
+      JSON.stringify({ type: "update", content: data.content, user } satisfies ServerMessage),
+      [sender.id]
+    );
   }
 
-  onRequest(req: Party.Request) {
-    // response to any HTTP request (any method, any path) with the current
-    // count. This allows us to use SSR to give components an initial value
-
-    // if the request is a POST, increment the count
-    if (req.method === "POST") {
-      this.increment();
-    }
-
-    return new Response(this.count.toString());
-  }
-
-  increment() {
-    this.count = (this.count + 1) % 100;
-    // broadcast the new count to all clients
-    this.room.broadcast(this.count.toString(), []);
+  onClose(conn: Party.Connection) {
+    this.users.delete(conn.id);
+    this.room.broadcast(
+      JSON.stringify({ type: "leave", userId: conn.id } satisfies ServerMessage)
+    );
   }
 }
 
-Server satisfies Party.Worker;
+LiveNotesServer satisfies Party.Worker;
+

@@ -1,0 +1,200 @@
+import { useEffect, useRef, useState, useCallback } from "react";
+import PartySocket from "partysocket";
+import type { NoteState, User } from "../party/server";
+const HOST = import.meta.env.VITE_PARTYKIT_HOST ?? "localhost:1999";
+const ROOM = "study-notes";
+type IncomingMessage =
+| { type: "sync"; note: NoteState; users: User[] }
+| { type: "update"; content: string; user: User }
+| { type: "join"; user: User }
+| { type: "leave"; userId: string };
+function getOrSetName(): string {
+let name = localStorage.getItem("study-name");
+if (!name) {
+name = prompt("Enter your name for the study session:") || "Anonymous";
+localStorage.setItem("study-name", name);
+}
+return name;
+}
+export default function App() {
+const [content, setContent] = useState("");
+const [users, setUsers] = useState<User[]>([]);
+const [lastEdit, setLastEdit] = useState<{ by: string; at: number } | null>(null);
+const [myUser, setMyUser] = useState<User | null>(null);
+const socketRef = useRef<PartySocket | null>(null);
+const isRemoteUpdate = useRef(false);
+useEffect(() => {
+const name = getOrSetName();
+const socket = new PartySocket({
+host: HOST,
+room: ROOM,
+query: { name },
+});
+socketRef.current = socket;
+socket.addEventListener("message", (event) => {
+const msg: IncomingMessage = JSON.parse(event.data);
+if (msg.type === "sync") {
+isRemoteUpdate.current = true;
+setContent(msg.note.content);
+setUsers(msg.users);
+if (msg.note.lastEditedBy) {
+setLastEdit({ by: msg.note.lastEditedBy, at: msg.note.lastEditedAt });
+}
+// Identify self after sync (server assigns color)
+const me = msg.users.find((u) => u.id === socket.id);
+if (me) setMyUser(me);
+}
+if (msg.type === "update") {
+isRemoteUpdate.current = true;
+setContent(msg.content);
+setLastEdit({ by: msg.user.name, at: Date.now() });
+}
+if (msg.type === "join") {
+setUsers((prev) =>
+prev.find((u) => u.id === msg.user.id) ? prev : [...prev, msg.user]
+);
+}
+if (msg.type === "leave") {
+setUsers((prev) => prev.filter((u) => u.id !== msg.userId));
+}
+});
+return () => socket.close();
+}, []);
+const handleChange = useCallback(
+(e: React.ChangeEvent<HTMLTextAreaElement>) => {
+const value = e.target.value;
+setContent(value);
+socketRef.current?.send(JSON.stringify({ type: "update", content: value }));
+},
+[]
+);
+const handleDownload = () => {
+const blob = new Blob([content], { type: "text/plain" });
+const url = URL.createObjectURL(blob);
+const a = document.createElement("a");
+a.href = url;
+a.download = `study-notes-${ROOM}.txt`;
+a.click();
+URL.revokeObjectURL(url);
+};
+return (
+<div style={styles.container}>
+{/* Header /}
+<div style={styles.header}>
+<div>
+<h1 style={styles.title}>📚 Study Group Live Notes</h1>
+<p style={styles.room}>Room: <strong>{ROOM}</strong></p>
+</div>
+<button onClick={handleDownload} style={styles.downloadBtn}>
+⬇ Download Notes
+</button>
+</div>
+{/* Presence bar /}
+<div style={styles.presenceBar}>
+<span style={styles.presenceLabel}>Online now:</span>
+{users.map((u) => (
+<div key={u.id} style={styles.avatar(u.color)} title={u.name}>
+{u.name[0].toUpperCase()}
+</div>
+))}
+{users.length === 0 && <span style={styles.muted}>Just you…</span>}
+</div>
+{/* Editor /}
+<textarea
+style={styles.editor}
+value={content}
+onChange={handleChange}
+placeholder="Start typing your notes here. Everyone in the room sees changes live…"
+spellCheck
+/>
+{/* Footer /}
+<div style={styles.footer}>
+{lastEdit ? (
+<span style={styles.muted}>
+Last edited by <strong>{lastEdit.by}</strong> ·{" "}
+{new Date(lastEdit.at).toLocaleTimeString()}
+</span>
+) : (
+<span style={styles.muted}>No edits yet</span>
+)}
+{myUser && (
+<span style={{ ...styles.muted, marginLeft: "auto" }}>
+You are{" "}
+<strong style={{ color: myUser.color }}>{myUser.name}</strong>
+</span>
+)}
+</div>
+</div>
+);
+}
+// ─── Inline styles ────────────────────────────────────────────────────────────
+const styles = {
+container: {
+maxWidth: 860,
+margin: "40px auto",
+padding: "0 20px",
+fontFamily: "'Segoe UI', sans-serif",
+},
+header: {
+display: "flex",
+justifyContent: "space-between",
+alignItems: "flex-start",
+marginBottom: 16,
+},
+title: { margin: 0, fontSize: 24, color: "#1a1a2e" },
+room: { margin: "4px 0 0", color: "#555", fontSize: 14 },
+downloadBtn: {
+padding: "8px 16px",
+background: "#e63946",
+color: "#fff",
+border: "none",
+borderRadius: 8,
+cursor: "pointer",
+fontWeight: 600,
+fontSize: 14,
+},
+presenceBar: {
+display: "flex",
+alignItems: "center",
+gap: 8,
+marginBottom: 12,
+flexWrap: "wrap" as const,
+},
+presenceLabel: { fontSize: 13, color: "#555", marginRight: 4 },
+avatar: (color: string) =>
+({
+width: 32,
+height: 32,
+borderRadius: "50%",
+background: color,
+color: "#fff",
+display: "flex",
+alignItems: "center",
+justifyContent: "center",
+fontWeight: 700,
+fontSize: 14,
+cursor: "default",
+} as React.CSSProperties),
+editor: {
+width: "100%",
+minHeight: 480,
+padding: 20,
+fontSize: 16,
+lineHeight: 1.7,
+border: "2px solid #ddd",
+borderRadius: 12,
+resize: "vertical" as const,
+outline: "none",
+boxSizing: "border-box" as const,
+fontFamily: "inherit",
+transition: "border-color 0.2s",
+},
+footer: {
+display: "flex",
+alignItems: "center",
+marginTop: 10,
+fontSize: 13,
+},
+muted: { color: "#888" },
+};
+
